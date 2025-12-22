@@ -1,4 +1,6 @@
 from torch.utils.tensorboard import SummaryWriter
+import time
+from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.nn as nn
 import torch.utils.data import DataLoader
@@ -103,7 +105,8 @@ if __name__ == "__main__":
 
   # 新增
   # 创建TensorBoard日志目录
-  log_dir = os.path.join(os.path.dirname(config.save_path), "tensorboard_logs")
+  timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+  log_dir = os.path.join(os.path.dirname(config.save_path), "tensorboard_logs", timestamp)
   os.makedirs(log_dir, exist_ok=True)
   writer = SummaryWriter(log_dir=log_dir)
 
