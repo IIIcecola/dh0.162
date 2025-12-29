@@ -29,7 +29,11 @@ class WarmupCosineScheduler(torch.optim.lr_scheduler._LRScheduler):
 
     for base_lr in self.base_lrs:
       if step < self.warmup_steps:
-        lr = base_lr * step / max(1, self.warmup_steps)
+        # lr = base_lr * step / max(1, self.warmup_steps)
+        # 余弦warmup：从0平滑增长到base_lr（替代原线性增长）
+        progress = step / self.warmup_steps  # 0~1
+        cosine_warmup = 0.5 * (1 - math.cos(math.pi * progress))  # 0~1
+        lr = base_lr * cosine_warmup
       else:
         progress = (step-self.warmup_steps) / max(1, self.total_steps-self.warmup_steps)
         cosine = 0.5 * (1+math.cos(math.pi*progress))
@@ -76,6 +80,7 @@ def train(model, dataloader, optimizer, scheduler, criterion, device, writer, co
       # 计算batch总损失并反向传播
       batch_loss = torch.stack(sample_weighted_loss).mean()  # 也可使用sum()
       batch_loss.backward()
+      torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
       optimizer.step()
       scheduler.step()
       # 日志记录（新增模块loss监控）
