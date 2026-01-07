@@ -400,7 +400,8 @@ class Audio2FaceTester:
                 ax.plot(pred_face[:, param_idx], 'b-', label='预测', alpha=0.7, linewidth=1.5)
                 
                 # 绘制真实值（如果存在）
-                if gt_face is not None and len(gt_face) == len(pred_face):
+                # if gt_face is not None and len(gt_face) == len(pred_face):
+                if gt_face is not None:
                     ax.plot(gt_face[:, param_idx], 'r--', label='真实', alpha=0.7, linewidth=1.5)
                 
                 ax.set_title(f'参数 {param_idx}')
