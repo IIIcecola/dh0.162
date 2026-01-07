@@ -39,7 +39,7 @@ class UE_CurvesManager:
         
         self.curve_name = datas['AnimName']
         self.data = datas[self.curve_name]
-        self.time_long = datas['time_long']
+        # self.time_long = datas['time_long']
     
     def get_match_data(self,key,t):
         """
