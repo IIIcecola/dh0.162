@@ -3,8 +3,8 @@ import time
 from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.nn as nn
-import torch.utils.data import DataLoader
-import torch.optim import AdamW
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
 import math
 import argparse
 from omegaconf import Omegaconf
@@ -13,7 +13,7 @@ import os
 from ModelDecoder import TransformerStackedDecoder
 from AudioDataset import AudioDataset
 
-from transformers import Wav2Vec2Peocessor, Wav2Vec2Model
+from transformers import Wav2Vec2Processor, Wav2Vec2Model
 
 
 class WarmupCosineScheduler(torch.optim.lr_scheduler._LRScheduler):
@@ -174,7 +174,7 @@ if __name__ == "__main__":
       pin_memory=config.dataset.pin_memory
   )
 
-  decoderModel = TransformerStackDecoder(
+  decoderModel = TransformerStackedDecoder(
     input_dim=config.model.input_dim,
     output_dim=config.model.output_dim,
     num_layers=config.model.num_layers,
