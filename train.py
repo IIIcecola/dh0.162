@@ -3,6 +3,7 @@ import time
 from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.nn as nn
+from torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 import math
@@ -12,6 +13,7 @@ import os
 
 from ModelDecoder import TransformerStackedDecoder
 from AudioDataset import AudioDataset
+from losses import LossManager
 
 from transformers import Wav2Vec2Processor, Wav2Vec2Model
 
@@ -41,15 +43,15 @@ class WarmupCosineScheduler(torch.optim.lr_scheduler._LRScheduler):
       lrs.append(lr)
     return lrs
 
-def train(model, dataloader, optimizer, scheduler, criterion, device, writer, config):
+def train(model, dataloader, optimizer, scheduler, loss_manager, device, writer, config):
   """
-  新增训练可视化，多源数据loss权重控制及可视化解耦
+  :param loss_manager: 损失函数管理器
   :param writer: tensorboard的writer参数
   :param module_loss_weight: 多源数据loss权重
   """
   
   model.train()
-  criterion.reduction = "none" # 改为"none"以获取每个样本的原始loss
+  # criterion.reduction = "none" # 改为"none"以获取每个样本的原始loss
   dataset_module_names = config.dataset_module_names
   epochs = config.epochs
   
