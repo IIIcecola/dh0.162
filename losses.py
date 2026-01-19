@@ -1,17 +1,73 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
+from typing import Dict, List, Union, Optional
+from abc import ABC, abstractmethod
 
 
-class BaseLoss(nn.Module):
-  def __init__(self, **kwargs):
+# Base Loss Class
+class BaseLoss(ABC, nn.Module):
+  def __init__(self):
     super().__init__()
-    self.params = kwargs
+    self.name = self.__class__.__name__
 
-  def forward(self, output, target):
-    raise NotImplementedError("Subclass must implement forward method")
+  @abstractmethod
+  def forward(self, pred, target):
+    """
+    计算loss
 
+    Args:
+      pred: (B, T, D) or (B, T) predictions
+      target: (B, T, D) or (B, T) targets
+    Returns:
+      loss: scalar tensor or unreduced tensor
+    """
+    pass
+
+  def get_config(self) -> Dict:
+    """返回当前配置的字典"""
+    return {}
+
+
+# Standard Losses
+class MSELoss(BaseLoss):
+  """
+  Config: 
+    loss_type: "mse"
+    reduction: "mean" | "sum" | "none"
+  """
+  def __init__(self, reduction="mean"):
+    super().__init__()
+    self.reduction = reduction
+    self.mse_loss = nn.MSELoss(reduction=reduction)
+
+  def forward(self, pred, target):
+    return self.mse_loss(pred, target)
+
+  def get_config(self):
+    return {"reduction": self.reduction}
+  
+class L1Loss(BaseLoss):
+  """
+  Config:
+    loss_type: "l1"
+    reduction: "mean" | "sum" | "none"
+  """
+  def __init__(self, reduction="mean"):
+    super().__init__()
+    self.reduction = reduction
+
+  def forward(self, pred, target):
+    if self.reduction == "mean":
+      return torch.mean(torch.abs(pred-target))
+    elif self.reduction == "sum":
+      return torch.sum(torch.abs(pred-target))
+    else: 
+      return torch.abs(pred-target)
+
+  def get_config(self):
+    return {"reduction": self.reduction}
 
 class RankLoss01Range(BaseLoss):
   """
@@ -63,5 +119,97 @@ class RankLoss01Range(BaseLoss):
 
     return rank_loss
     
+
+# combinded Loss
+class CombinedLoss(BaseLoss):
+  """
+  组合多个loss
+  Config:
+    loss_type: "combined"
+    losses: List[dict]
+
+  每个loss配置：
+  {
+    "type": "mse" | "" | "" | ... ,
+    "weight": float, # 该loss权重
+    "params": dict # loss特定参数（可选）
+  }
+  """
+  LOSS_REGISTRY = {
+    "mse": MSELoss,
+    "l1": L1Loss
+  }
+
+  def __init__(self, losses_config: List[Dict]):
+    super().__init__()
+
+    self.losses_list = []
+    self.weights = []
+
+    for loss_config in losses_config:
+      loss_type = loss_config["type"]
+      weight = loss_config.get("weight", 1.0)
+      params = loss_config.get("params", {})
+
+      if loss_type not in self.LOSS_REGISTRY:
+        raise ValueError()
+
+      loss_class = self.LOSS_REGISTRY[loss_type]
+      loss_instance = loss_class(**params)
+
+      self.losses_list.append(loss_instance)
+      self.weights.append(weight)
+
+      if isinstance(loss_instance, nn.Module):
+        self.add_module(f"loss_{len(self.losses_list)-1}", loss_instance)
+
+    print()
+    for i, (loss, w) in enumerate(zip(self.losses_list, self.weights)):
+      print(f" [{i}] {loss.name}: weight={w}")
+
+  def forward(self, pred, target):
+    """
+    计算组合loss
+    """
+    total_loss = 0.0
+    loss_dict = {}
+
+    for loss, weight in zip(self.losses_list, self.weights):
+      loss_value = loss(pred, target)
+      if loss_value.dim() > 0:
+        loss_value = loss_value.mean()
+      total_loss = total_loss + weight * loss_value
+      loss_dict[loss.name] = {
+        "value": loss_value.item(),
+        "weighted": weight * loss_value.item()
+      }
+    loss_dict["total"]: total_loss.item()
+    return total_loss, loss_dict
+
+  def get_config(self):
+    config = {
+      "loss_type": "combined",
+      "losses": []
+    }
+    for loss, weight in zip(self.losses_list, self.weights):
+      loss_config = {
+        "type": loss.name,
+        "weight": weight,
+        "params": loss.get_coinfig()
+      }
+      config["losses"].append(loss_config)
+    return config
+
+
+
+
+
+
+
+
+
+
+
+
 
 
