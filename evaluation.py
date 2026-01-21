@@ -796,6 +796,534 @@ class Audio2FaceTester:
         except Exception as e:
             self.logger.warning(f"创建性能对比图失败: {str(e)}")
 
+# 直接接收推理后的json目录，可视化
+class Audio2FaceResultEvaluator:
+    """
+    专门处理已有推理结果的评估器
+    输入: 推理结果目录 + 真值目录，直接进行对比评估
+    """
+    
+    def __init__(
+        self,
+        pred_dir: str,  # 推理结果目录，包含 transformer_pred_*.json 文件
+        gt_dir: str,    # 真值目录，包含 CD_*_1_converted.json 文件
+        output_dir: str = "./result_evaluation",
+        param_mapping_path: str = "./ctrl_expressions_map.json",
+        max_params_per_category: int = 10,
+        fps: int = 25
+    ):
+        """
+        初始化结果评估器
+        
+        Args:
+            pred_dir: 预测结果JSON文件目录
+            gt_dir: 真实值JSON文件目录
+            output_dir: 输出目录
+            param_mapping_path: 参数映射文件路径
+            max_params_per_category: 每个类别最大显示参数数
+            fps: 帧率
+        """
+        self.logger = setup_logging()
+        self.logger.info("初始化Audio2Face结果评估器...")
+        
+        self.pred_dir = Path(pred_dir)
+        self.gt_dir = Path(gt_dir)
+        self.output_dir = Path(output_dir)
+        
+        # 创建子目录
+        self.visualization_dir = self.output_dir / "visualization"
+        self.metrics_dir = self.output_dir / "metrics"
+        self.summary_dir = self.output_dir / "summary"
+        
+        for dir_path in [self.visualization_dir, self.metrics_dir, self.summary_dir]:
+            dir_path.mkdir(exist_ok=True, parents=True)
+        
+        self.fps = fps
+        
+        # 检查目录存在性
+        if not self.pred_dir.exists():
+            raise FileNotFoundError(f"预测结果目录不存在: {self.pred_dir}")
+        if not self.gt_dir.exists():
+            self.logger.warning(f"真值目录不存在: {self.gt_dir}, 将只进行可视化")
+        
+        # 初始化可视化器（复用原有可视化器）
+        self.visualizer = FacialParamVisualizer(
+            param_mapping_path=param_mapping_path,
+            fps=fps,
+            max_params_per_category=max_params_per_category,
+            output_dir=str(self.visualization_dir)
+        )
+        
+        # 结果存储
+        self.all_results = []
+        self.logger.info("结果评估器初始化完成")
+    
+    def extract_filename_from_pred(self, pred_filename: str) -> str:
+        """
+        从预测文件名提取原始音频名称
+        
+        Args:
+            pred_filename: 如 "transformer_pred_test1.json"
+        
+        Returns:
+            如 "test1"
+        """
+        # 移除前缀 "transformer_pred_" 和后缀 ".json"
+        if pred_filename.startswith("transformer_pred_"):
+            base_name = pred_filename[len("transformer_pred_"):]
+        else:
+            base_name = pred_filename
+        
+        if base_name.endswith(".json"):
+            base_name = base_name[:-5]
+        
+        return base_name
+    
+    def find_matching_gt_file(self, audio_name: str) -> Optional[Path]:
+        """
+        根据音频名称查找匹配的真值文件
+        
+        支持多种真值文件命名格式:
+        1. CD_{audio_name}_1_converted.json (主要)
+        2. apply_{audio_name}.json (备选)
+        """
+        possible_files = [
+            self.gt_dir / f"CD_{audio_name}_1_converted.json",
+            self.gt_dir / f"apply_{audio_name}.json",
+            self.gt_dir / f"{audio_name}.json",  # 纯音频名
+        ]
+        
+        for gt_file in possible_files:
+            if gt_file.exists():
+                return gt_file
+        
+        return None
+    
+    def load_face_pred_from_json(self, json_path: Path) -> Optional[np.ndarray]:
+        """
+        从JSON文件加载face_pred字段
+        
+        Returns:
+            face_pred序列数组 (T, 136)
+        """
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            face_pred = data.get('face_pred', [])
+            if not face_pred:
+                self.logger.warning(f"JSON文件没有face_pred字段: {json_path}")
+                return None
+            
+            # 转换为numpy数组
+            face_pred_array = np.array(face_pred)
+            
+            # 验证维度
+            if len(face_pred_array.shape) != 2:
+                self.logger.warning(f"face_pred维度异常: {face_pred_array.shape}, 文件: {json_path}")
+                return None
+            
+            self.logger.debug(f"加载 {json_path.name}: {face_pred_array.shape}")
+            return face_pred_array
+            
+        except Exception as e:
+            self.logger.error(f"加载JSON文件失败 {json_path}: {str(e)}")
+            return None
+    
+    def compute_metrics(self, pred_face: np.ndarray, gt_face: np.ndarray) -> Dict[str, float]:
+        """
+        计算评估指标（复用原有逻辑，可以导入或直接复制）
+        """
+        # 这里可以直接从原脚本导入compute_metrics函数
+        # 或者复制实现逻辑
+        try:
+            min_len = min(len(pred_face), len(gt_face))
+            pred_face = pred_face[:min_len]
+            gt_face = gt_face[:min_len]
+            
+            metrics = {}
+            
+            # MSE
+            mse = np.mean((pred_face - gt_face) ** 2)
+            metrics['mse'] = float(mse)
+            
+            # MAE
+            mae = np.mean(np.abs(pred_face - gt_face))
+            metrics['mae'] = float(mae)
+            
+            # 相关系数
+            correlations = []
+            for i in range(pred_face.shape[1]):
+                if (np.std(pred_face[:, i]) > 1e-6 and 
+                    np.std(gt_face[:, i]) > 1e-6):
+                    corr = np.corrcoef(pred_face[:, i], gt_face[:, i])[0, 1]
+                    if not np.isnan(corr):
+                        correlations.append(corr)
+            
+            if correlations:
+                metrics['avg_correlation'] = float(np.mean(correlations))
+                metrics['max_correlation'] = float(np.max(correlations))
+                metrics['min_correlation'] = float(np.min(correlations))
+            else:
+                metrics['avg_correlation'] = 0.0
+                metrics['max_correlation'] = 0.0
+                metrics['min_correlation'] = 0.0
+            
+            # RMSE
+            metrics['rmse'] = float(np.sqrt(mse))
+            
+            # SMAPE
+            denominator = np.abs(pred_face) + np.abs(gt_face) + 1e-8
+            smape = 200 * np.mean(np.abs(pred_face - gt_face) / denominator)
+            metrics['smape'] = float(smape)
+            
+            self.logger.info(f"评估指标: MSE={mse:.4f}, MAE={mae:.4f}, 平均相关={metrics.get('avg_correlation', 0):.4f}")
+            
+            return metrics
+            
+        except Exception as e:
+            self.logger.error(f"计算评估指标失败: {str(e)}")
+            return {}
+    
+    def evaluate_single_pair(
+        self, 
+        pred_path: Path, 
+        gt_path: Optional[Path] = None
+    ) -> Optional[Dict]:
+        """
+        评估单个预测-真值对
+        
+        Returns:
+            包含评估结果的字典
+        """
+        audio_name = pred_path.stem
+        self.logger.info(f"评估样本: {audio_name}")
+        
+        try:
+            # 1. 加载预测结果
+            pred_face = self.load_face_pred_from_json(pred_path)
+            if pred_face is None:
+                return None
+            
+            # 2. 加载真值（如果存在）
+            gt_face = None
+            if gt_path and gt_path.exists():
+                gt_face = self.load_face_pred_from_json(gt_path)
+            
+            # 3. 可视化
+            saved_paths = []
+            if gt_face is not None:
+                # 有真值：进行对比可视化
+                saved_paths = self.visualizer.plot_all_categories(
+                    pred_face,
+                    gt_face,
+                    audio_name,
+                    output_dir=str(self.visualization_dir / audio_name)
+                )
+                
+                # 创建仪表板
+                dashboard_path = self.visualization_dir / f"{audio_name}_dashboard.png"
+                category_errors, category_correlations = self.visualizer.plot_summary_dashboard(
+                    pred_face,
+                    gt_face,
+                    audio_name,
+                    str(dashboard_path)
+                )
+            else:
+                # 只有预测：单序列可视化
+                self.visualizer.plot_all_categories(
+                    pred_face,
+                    None,  # 没有真值
+                    audio_name,
+                    output_dir=str(self.visualization_dir / audio_name)
+                )
+            
+            # 4. 计算评估指标（如果有真值）
+            eval_metrics = {}
+            category_errors = {}
+            category_correlations = {}
+            
+            if gt_face is not None:
+                # 确保维度匹配
+                if pred_face.shape[1] != gt_face.shape[1]:
+                    self.logger.warning(
+                        f"维度不匹配: 预测{pred_face.shape[1]}, 真值{gt_face.shape[1]}"
+                    )
+                    min_dim = min(pred_face.shape[1], gt_face.shape[1])
+                    pred_face = pred_face[:, :min_dim]
+                    gt_face = gt_face[:, :min_dim]
+                
+                # 计算全局指标
+                eval_metrics = self.compute_metrics(pred_face, gt_face)
+                
+                # 保存指标
+                if eval_metrics:
+                    metrics_path = self.metrics_dir / f"{audio_name}_metrics.json"
+                    with open(metrics_path, 'w') as f:
+                        json.dump(eval_metrics, f, indent=2)
+            
+            # 5. 收集结果
+            result = {
+                'audio_name': audio_name,
+                'pred_file': pred_path.name,
+                'gt_file': gt_path.name if gt_path else None,
+                'has_gt': gt_face is not None,
+                'pred_shape': list(pred_face.shape),
+                'gt_shape': list(gt_face.shape) if gt_face is not None else None,
+                'frame_count': len(pred_face),
+                'fps': self.fps
+            }
+            
+            # 添加评估指标
+            result.update(eval_metrics)
+            
+            # 添加类别指标
+            if gt_face is not None:
+                for category, error in category_errors.items():
+                    result[f'{category}_mae'] = error
+                for category, corr in category_correlations.items():
+                    result[f'{category}_corr'] = corr
+            
+            self.logger.info(f"完成评估: {audio_name}")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"评估样本失败 {audio_name}: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return None
+    
+    def run_evaluation(self, result_name: str = "result_evaluation") -> pd.DataFrame:
+        """
+        运行完整的结果评估
+        
+        Returns:
+            包含所有评估结果的DataFrame
+        """
+        # 获取所有预测文件
+        pred_files = list(self.pred_dir.glob("transformer_pred_*.json"))
+        if not pred_files:
+            # 也支持没有前缀的文件
+            pred_files = list(self.pred_dir.glob("*.json"))
+        
+        if not pred_files:
+            raise FileNotFoundError(f"在 {self.pred_dir} 中没有找到JSON文件")
+        
+        self.logger.info(f"找到 {len(pred_files)} 个预测文件")
+        
+        # 处理每个预测文件
+        all_results = []
+        
+        for pred_path in pred_files:
+            # 提取音频名称
+            audio_name = self.extract_filename_from_pred(pred_path.name)
+            
+            # 查找匹配的真值文件
+            gt_path = None
+            if self.gt_dir.exists():
+                gt_path = self.find_matching_gt_file(audio_name)
+                if not gt_path:
+                    self.logger.warning(f"未找到 {audio_name} 的真值文件")
+            
+            # 评估单个样本
+            result = self.evaluate_single_pair(pred_path, gt_path)
+            if result:
+                all_results.append(result)
+        
+        # 生成报告
+        report = self._generate_evaluation_report(all_results, result_name)
+        
+        return report
+    
+    def _generate_evaluation_report(self, all_results: List[Dict], result_name: str) -> pd.DataFrame:
+        """生成评估报告"""
+        # 转换为DataFrame
+        df = pd.DataFrame(all_results)
+        
+        if df.empty:
+            self.logger.warning("没有有效的评估结果")
+            return df
+        
+        # 汇总统计
+        summary = {
+            'total_samples': len(df),
+            'samples_with_gt': df['has_gt'].sum() if 'has_gt' in df.columns else 0,
+            'total_frame_count': df['frame_count'].sum() if 'frame_count' in df.columns else 0,
+            'avg_frame_count': df['frame_count'].mean() if 'frame_count' in df.columns else 0,
+        }
+        
+        # 添加评估指标统计（如果有GT）
+        if 'mse' in df.columns and df['has_gt'].any():
+            gt_samples = df[df['has_gt']]
+            summary['avg_mse'] = gt_samples['mse'].mean()
+            summary['avg_mae'] = gt_samples['mae'].mean()
+            summary['avg_rmse'] = gt_samples['rmse'].mean()
+            summary['avg_correlation'] = gt_samples['avg_correlation'].mean()
+            summary['samples_with_gt'] = len(gt_samples)
+        
+        # 保存汇总报告
+        summary_path = self.summary_dir / f"{result_name}_summary.json"
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        # 保存详细结果CSV
+        csv_path = self.summary_dir / f"{result_name}_detailed.csv"
+        df.to_csv(csv_path, index=False)
+        
+        # 创建可视化报告
+        self._create_evaluation_summary_visualization(df, summary, result_name)
+        
+        self.logger.info(f"评估报告已保存到: {self.summary_dir}")
+        self.logger.info(f"汇总结果: {summary}")
+        
+        return df
+    
+    def _create_evaluation_summary_visualization(self, df: pd.DataFrame, summary: Dict, result_name: str):
+        """创建评估汇总可视化"""
+        try:
+            # 确定子图数量
+            has_gt = 'has_gt' in df.columns and df['has_gt'].any()
+            num_plots = 2 if has_gt else 1
+            
+            fig, axes = plt.subplots(1, num_plots, figsize=(5*num_plots, 4))
+            if num_plots == 1:
+                axes = [axes]
+            
+            # 1. 帧数分布
+            ax = axes[0]
+            if 'frame_count' in df.columns:
+                ax.hist(df['frame_count'], bins=10, alpha=0.7, color='skyblue', edgecolor='black')
+                ax.axvline(df['frame_count'].mean(), color='red', linestyle='--',
+                          label=f'均值: {df["frame_count"].mean():.0f}')
+                ax.set_xlabel('帧数')
+                ax.set_ylabel('样本数')
+                ax.set_title('帧数分布')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            
+            # 2. 如果有GT，显示MSE分布
+            if has_gt and 'mse' in df.columns:
+                ax = axes[1] if num_plots > 1 else axes[0]
+                valid_mse = df[df['has_gt']]['mse']
+                ax.hist(valid_mse, bins=10, alpha=0.7, color='salmon', edgecolor='black')
+                ax.axvline(valid_mse.mean(), color='red', linestyle='--',
+                          label=f'均值: {valid_mse.mean():.4f}')
+                ax.set_xlabel('MSE')
+                ax.set_ylabel('样本数')
+                ax.set_title('均方误差分布 (越低越好)')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            
+            plt.suptitle(f'结果评估汇总 - {result_name}', fontsize=14)
+            plt.tight_layout()
+            
+            summary_viz_path = self.summary_dir / f"{result_name}_summary.png"
+            plt.savefig(summary_viz_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+        except Exception as e:
+            self.logger.warning(f"创建评估汇总可视化失败: {str(e)}")
+    
+    def compare_multiple_results(
+        self, 
+        result_dirs: Dict[str, str], 
+        gt_dir: str,
+        comparison_name: str = "multi_model_comparison"
+    ):
+        """
+        比较多个不同模型/配置的推理结果
+        
+        Args:
+            result_dirs: 字典，key为模型名称，value为结果目录路径
+            gt_dir: 真值目录
+            comparison_name: 比较实验名称
+        """
+        self.logger.info(f"开始多结果比较: {list(result_dirs.keys())}")
+        
+        comparison_dir = self.output_dir / "comparisons" / comparison_name
+        comparison_dir.mkdir(exist_ok=True, parents=True)
+        
+        all_comparison_results = []
+        
+        for model_name, result_dir in result_dirs.items():
+            self.logger.info(f"处理模型: {model_name}")
+            
+            # 为该模型创建评估器
+            model_evaluator = Audio2FaceResultEvaluator(
+                pred_dir=result_dir,
+                gt_dir=gt_dir,
+                output_dir=str(comparison_dir / model_name),
+                param_mapping_path=self.visualizer.param_mapping_path,
+                max_params_per_category=self.visualizer.max_params_per_category,
+                fps=self.fps
+            )
+            
+            # 运行评估
+            results_df = model_evaluator.run_evaluation(result_name=model_name)
+            
+            # 添加模型名称列
+            if not results_df.empty:
+                results_df['model'] = model_name
+                all_comparison_results.append(results_df)
+        
+        # 合并所有结果
+        if all_comparison_results:
+            combined_df = pd.concat(all_comparison_results, ignore_index=True)
+            
+            # 保存合并结果
+            combined_csv = comparison_dir / f"{comparison_name}_combined.csv"
+            combined_df.to_csv(combined_csv, index=False)
+            
+            # 创建比较图表
+            self._create_comparison_visualization(combined_df, comparison_dir, comparison_name)
+            
+            self.logger.info(f"多模型比较完成，结果保存在: {comparison_dir}")
+            
+            return combined_df
+        
+        return pd.DataFrame()
+    
+    def _create_comparison_visualization(self, df: pd.DataFrame, output_dir: Path, comparison_name: str):
+        """创建多模型比较可视化"""
+        try:
+            if 'model' not in df.columns or 'mse' not in df.columns:
+                return
+            
+            # 模型性能对比（箱线图）
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            
+            # 1. MSE对比
+            models = df['model'].unique()
+            mse_data = [df[df['model'] == model]['mse'].dropna() for model in models]
+            
+            bp1 = axes[0].boxplot(mse_data, labels=models, patch_artist=True)
+            for patch, color in zip(bp1['boxes'], plt.cm.Set3.colors):
+                patch.set_facecolor(color)
+            axes[0].set_title('MSE对比 (越低越好)')
+            axes[0].set_ylabel('MSE')
+            axes[0].grid(True, alpha=0.3, axis='y')
+            axes[0].tick_params(axis='x', rotation=45)
+            
+            # 2. 相关系数对比
+            if 'avg_correlation' in df.columns:
+                corr_data = [df[df['model'] == model]['avg_correlation'].dropna() for model in models]
+                bp2 = axes[1].boxplot(corr_data, labels=models, patch_artist=True)
+                for patch, color in zip(bp2['boxes'], plt.cm.Set3.colors):
+                    patch.set_facecolor(color)
+                axes[1].set_title('平均相关系数对比 (越高越好)')
+                axes[1].set_ylabel('相关系数')
+                axes[1].grid(True, alpha=0.3, axis='y')
+                axes[1].tick_params(axis='x', rotation=45)
+            
+            plt.suptitle(f'多模型性能对比 - {comparison_name}', fontsize=14)
+            plt.tight_layout()
+            
+            comparison_path = output_dir / f"{comparison_name}_performance_comparison.png"
+            plt.savefig(comparison_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            
+        except Exception as e:
+            self.logger.warning(f"创建比较可视化失败: {str(e)}")
+
 
 """
 面部参数可视化器
@@ -975,6 +1503,10 @@ class FacialParamVisualizer:
             output_path: 输出路径
             title_suffix: 标题后缀
         """
+        if gt_face is not None:
+            min_len = min(len(pred_face), len(gt_face))
+            pred_face = pred_face[:min_len]
+            gt_face = gt_face[:min_len]
         if category not in self.param_groups:
             self.logger.warning(f"未知的参数类别: {category}")
             return
@@ -1127,6 +1659,10 @@ class FacialParamVisualizer:
         """
         绘制单个类别的统计信息图
         """
+        if gt_face is not None:
+            min_len = min(len(pred_face), len(gt_face))
+            pred_face = pred_face[:min_len]
+            gt_face = gt_face[:min_len]
         if category not in self.param_groups:
             return
         
@@ -1231,6 +1767,10 @@ class FacialParamVisualizer:
         Args:
             param_indices: 要分析的参数索引列表
         """
+        if gt_face is not None:
+            min_len = min(len(pred_face), len(gt_face))
+            pred_face = pred_face[:min_len]
+            gt_face = gt_face[:min_len]
         if param_indices is None:
             # 如果没有指定，选择变化最大的6个参数
             param_indices = self.select_key_params(pred_face, gt_face, 
@@ -1342,6 +1882,10 @@ class FacialParamVisualizer:
         """
         创建综合仪表板，展示整体评估结果
         """
+        if gt_face is not None:
+            min_len = min(len(pred_face), len(gt_face))
+            pred_face = pred_face[:min_len]
+            gt_face = gt_face[:min_len]
         # 计算每个类别的平均误差
         category_errors = {}
         category_correlations = {}
@@ -1462,22 +2006,39 @@ class FacialParamVisualizer:
         return category_errors, category_correlations
 
 
-
 def main():
-    """主函数"""
-    # 配置参数
-    CONFIG = {
-        'model': {"input_dim": 768, "output_dim": 136, "num_layers": 11, "num_heads": 24},
-        'model_weights': "./Weights/transformer_decoder_V3.pth",  # 模型权重路径
-        'wav2vec_path': "./wav2vec-base-960h",
-        'test_data_dir': "./test",  # 测试数据目录
-        'output_dir': "./test_results",  # 输出目录
-        'device': None,  # 设备: "cuda" 或 "cpu"，None表示自动选择
-        'param_mapping_path': "./ctrl_expressions_map.json",
-        'max_params_per_category': 10,
-        'fps': 25,  # 输出帧率
-        'result_name': "audio2face_evaluation"  # 测试结果名称
-    }
+    """统一的主函数，根据配置选择模式"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config.yaml", help="path to config file")
+    parser.add_argument("--mode", type=str, choices=["inference", "evaluate", "compare"], 
+                       help="override mode in config file")
+    args = parser.parse_args()
+
+    # 加载配置
+    config = OmegaConf.load(args.config)
+    
+    # 命令行参数覆盖配置文件
+    if args.mode:
+        config.mode = args.mode
+    
+    # 根据模式执行不同流程
+    if config.mode == "inference":
+        run_inference_mode(config)
+    elif config.mode == "evaluate":
+        run_evaluate_mode(config)
+    elif config.mode == "compare":
+        run_compare_mode(config)
+    else:
+        print(f"未知的模式: {config.mode}")
+        print("可用模式: inference, evaluate, compare")
+        sys.exit(1)
+
+
+def run_inference_mode(config):
+    """运行推理模式"""
+    print("=" * 60)
+    print("运行推理模式")
+    print("=" * 60)
     
     try:
         # 创建测试器
@@ -1499,28 +2060,65 @@ def main():
         )
         
         # 打印总结
-        print("\n" + "="*60)
-        print("测试完成!")
-        print("="*60)
-        
-        if not results_df.empty:
-            print(f"总测试样本数: {len(results_df)}")
-            print(f"有GT的样本数: {results_df['has_gt'].sum() if 'has_gt' in results_df.columns else 0}")
-            print(f"平均推理时间: {results_df['inference_time'].mean():.2f}s")
-            print(f"平均实时比: {results_df['real_time_factor'].mean():.2f}")
-            
-            if 'mse' in results_df.columns and results_df['has_gt'].any():
-                gt_samples = results_df[results_df['has_gt']]
-                print(f"平均MSE: {gt_samples['mse'].mean():.6f}")
-                print(f"平均MAE: {gt_samples['mae'].mean():.6f}")
-                print(f"平均相关系数: {gt_samples['avg_correlation'].mean():.4f}")
-        
-        print(f"详细结果保存在: {CONFIG['output_dir']}")
-        print("="*60)
+        print_results_summary(results_df, "推理模式")
         
     except Exception as e:
-        print(f"测试失败: {str(e)}")
+        print(f"推理模式失败: {str(e)}")
         traceback.print_exc()
+
+
+def run_evaluate_mode(config):
+    """运行结果评估模式"""
+    print("=" * 60)
+    print("运行结果评估模式")
+    print("=" * 60)
+    
+    try:
+        # 创建结果评估器
+        evaluator = Audio2FaceResultEvaluator(
+            pred_dir=config.evaluator.pred_dir,
+            gt_dir=config.evaluator.gt_dir,
+            output_dir=config.evaluator.output_dir,
+            param_mapping_path=config.visualizer.param_mapping_path,
+            max_params_per_category=config.visualizer.max_params_per_category,
+            fps=config.visualizer.fps
+        )
+        
+        # 运行评估
+        results_df = evaluator.run_evaluation(
+            result_name=config.visualizer.result_name
+        )
+        
+        # 打印总结
+        print_results_summary(results_df, "结果评估模式")
+        
+    except Exception as e:
+        print(f"结果评估模式失败: {str(e)}")
+        traceback.print_exc()
+
+
+def print_results_summary(df, mode_name):
+    """打印结果总结"""
+    if df.empty:
+        print("没有有效的测试结果")
+        return
+    
+    print(f"\n{mode_name}完成!")
+    print("-" * 40)
+    print(f"总样本数: {len(df)}")
+    print(f"有GT的样本数: {df['has_gt'].sum() if 'has_gt' in df.columns else 0}")
+    
+    if 'inference_time' in df.columns:
+        print(f"平均推理时间: {df['inference_time'].mean():.2f}s")
+        print(f"平均实时比: {df['real_time_factor'].mean():.2f}")
+    
+    if 'mse' in df.columns and 'has_gt' in df.columns and df['has_gt'].any():
+        gt_samples = df[df['has_gt']]
+        print(f"平均MSE: {gt_samples['mse'].mean():.6f}")
+        print(f"平均MAE: {gt_samples['mae'].mean():.6f}")
+        print(f"平均相关系数: {gt_samples['avg_correlation'].mean():.4f}")
+    
+    print("-" * 40)
 
 if __name__ == "__main__":
     main()
