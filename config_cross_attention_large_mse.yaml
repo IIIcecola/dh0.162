@@ -1,0 +1,75 @@
+# 我最近在训练audio2face的模型，目前采用的架构是cross-attention。模型参数配置为：
+
+
+exp_name: exp01
+config_name: cross-attention_mse-pc
+save_path: ${exp_name}/${config_name}/cross_attention_audio2face_large.pth
+device: cuda
+
+model:
+  input_dim: 768
+  output_dim: 136
+  num_queries: 125
+  
+  audio_encoder_type: transformer
+  audio_encoder_layers: 6
+  audio_encoder_nhead: 12
+  audio_encoder_ff_dim: 3072
+
+  query_type: embedding
+  
+  decoder_layers: 12
+  decoder_nhead: 24
+  decoder_ff_dim: 3072
+  dropout: 0.25
+
+loss:
+  loss_type: combined
+  losses:
+    - type: mse
+      weight: 1
+    - type: pearson_correlation
+      weight:0.4
+      params:
+        mode: per_feature
+
+training:
+  epochs: 400
+  save_every_n_steps: 10000
+  save_path: ${exp_name}/${config_name}
+  
+  optimizer:
+      type: AdamW
+      lr: 2e-4
+      weight_decay: 1e-5
+      betas: [0.9, 0.999]
+      
+  scheduler:
+    type: warmup_cosine
+    warmup_ratio: 0.05
+    min_lr: 1e-6
+
+dataloader:
+  batch_size: 256
+  num_workers: 4
+  pin_memory: ture
+  sampler:
+    oversample_factor: 2
+    replacement: True
+
+wav2vec2:
+  path: ./wav2vec2-base-960h
+
+
+
+
+
+
+
+
+
+
+
+
+
+
